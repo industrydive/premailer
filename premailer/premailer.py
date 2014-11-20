@@ -225,6 +225,12 @@ class Premailer(object):
                 for prop in important_properties
             )
 
+            bulk_all = ';'.join(
+                # combine important declarations into string (without the !important)
+                u'{0}:{1}'.format(prop.name, prop.value)
+                for prop in normal_properties + important_properties
+            )
+
             selectors = (
                 x.strip()
                 for x in rule.selectorText.split(',')
@@ -235,7 +241,7 @@ class Premailer(object):
                     ':' + selector.split(':', 1)[1]
                         not in FILTER_PSEUDOSELECTORS):
                     # a pseudoclass
-                    leftover.append((selector, ';'.join([bulk_normal,bulk_important])))
+                    leftover.append((selector, bulk_all))
                     continue
                 elif '*' in selector and not self.include_star_selectors:
                     continue

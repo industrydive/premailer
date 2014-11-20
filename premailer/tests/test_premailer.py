@@ -1156,9 +1156,11 @@ class Tests(unittest.TestCase):
         <style>
         .makeblue {
             color: blue !important;
+            font-size: 12px;
         }
         #identified {
             color: green;
+            font-size: 22px;
         }
         div.example {
             color: black;
@@ -1174,7 +1176,7 @@ class Tests(unittest.TestCase):
         <head>
         </head>
         <body>
-        <div id="identified" style="color:blue"></div>
+        <div id="identified" style="color:blue;font-size:22px"></div>
         </body>
         </html>"""
 

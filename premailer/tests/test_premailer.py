@@ -1176,7 +1176,7 @@ class Tests(unittest.TestCase):
         <head>
         </head>
         <body>
-        <div id="identified" style="color:blue;font-size:22px"></div>
+        <div id="identified" style="color:blue; font-size:22px"></div>
         </body>
         </html>"""
 

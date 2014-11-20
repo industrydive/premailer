@@ -186,6 +186,10 @@ class Premailer(object):
         self.disable_validation = disable_validation
 
     def _parse_style_rules(self, css_body, ruleset_index):
+        """ Returns a list of rules to apply to this doc and a list of rules that won't be used
+            because e.g. they are pseudoclasses. 
+            Rules look like: ((0, 1, 0, 0, 0), u'.makeblue', u'color:blue')
+        """
         leftover = []
         rules = []
         rule_index = 0
@@ -201,10 +205,26 @@ class Premailer(object):
             # only proceed for things we recognize
             if rule.type != rule.STYLE_RULE:
                 continue
-            bulk = ';'.join(
-                u'{0}:{1}'.format(key, rule.style[key])
-                for key in rule.style.keys()
+
+            normal_properties = [prop for prop in rule.style.getProperties() if prop.priority != 'important']
+            important_properties = [prop for prop in rule.style.getProperties() if prop.priority == 'important']
+
+            # bulk = ';'.join(
+            #     u'{0}:{1}'.format(key, rule.style[key])
+            #     for key in rule.style.keys()
+            # )
+
+            bulk_normal = ';'.join(
+                # create one string of non-!important properties
+                u'{0}:{1}'.format(prop.name, prop.value)
+                for prop in normal_properties
             )
+            bulk_important = ';'.join(
+                # combine important declarations into string (without the !important)
+                u'{0}:{1}'.format(prop.name, prop.value)
+                for prop in important_properties
+            )
+
             selectors = (
                 x.strip()
                 for x in rule.selectorText.split(',')
@@ -215,7 +235,7 @@ class Premailer(object):
                     ':' + selector.split(':', 1)[1]
                         not in FILTER_PSEUDOSELECTORS):
                     # a pseudoclass
-                    leftover.append((selector, bulk))
+                    leftover.append((selector, ';'.join([bulk_normal,bulk_important])))
                     continue
                 elif '*' in selector and not self.include_star_selectors:
                     continue
@@ -225,11 +245,19 @@ class Premailer(object):
                 class_count = selector.count('.')
                 element_count = len(_element_selector_regex.findall(selector))
 
-                specificity = (id_count, class_count, element_count, ruleset_index, rule_index)
+                # Split rules within this selector that are !important from those that aren't. Only create
+                # rule if there are property declarations under it
+                if bulk_important:
+                    is_important = 1
+                    specificity = (is_important, id_count, class_count, element_count, ruleset_index, rule_index)
+                    rules.append((specificity, selector, bulk_important))
+                    rule_index += 1
 
-                rules.append((specificity, selector, bulk))
-                rule_index += 1
-
+                if bulk_normal:
+                    is_important = 0
+                    specificity = (is_important, id_count, class_count, element_count, ruleset_index, rule_index)
+                    rules.append((specificity, selector, bulk_normal))
+                    rule_index += 1
         return rules, leftover
 
     def transform(self, pretty_print=True, **kwargs):

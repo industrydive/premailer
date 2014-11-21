@@ -187,8 +187,9 @@ class Premailer(object):
 
     def _parse_style_rules(self, css_body, ruleset_index):
         """ Returns a list of rules to apply to this doc and a list of rules that won't be used
-            because e.g. they are pseudoclasses. 
-            Rules look like: ((0, 1, 0, 0, 0), u'.makeblue', u'color:blue')
+            because e.g. they are pseudoclasses. Rules look like: (specificity, selector, bulk) 
+            for example: ((0, 1, 0, 0, 0), u'.makeblue', u'color:blue'). The bulk of the rule
+            should not end in a semicolon.
         """
         leftover = []
         rules = []
@@ -209,24 +210,18 @@ class Premailer(object):
             normal_properties = [prop for prop in rule.style.getProperties() if prop.priority != 'important']
             important_properties = [prop for prop in rule.style.getProperties() if prop.priority == 'important']
 
-            # bulk = ';'.join(
-            #     u'{0}:{1}'.format(key, rule.style[key])
-            #     for key in rule.style.keys()
-            # )
-
             bulk_normal = ';'.join(
-                # create one string of non-!important properties
+                # create semicolon delimitted string of non-!important properties
                 u'{0}:{1}'.format(prop.name, prop.value)
                 for prop in normal_properties
             )
             bulk_important = ';'.join(
-                # combine important declarations into string (without the !important)
-                u'{0}:{1}'.format(prop.name, prop.value)
+                # string of !important declarations
+                u'{0}:{1}'.format(prop.name, prop.value) # note value doesn't include "!important"
                 for prop in important_properties
             )
-
             bulk_all = ';'.join(
-                # combine important declarations into string (without the !important)
+                # string of ALL properties, important or not
                 u'{0}:{1}'.format(prop.name, prop.value)
                 for prop in normal_properties + important_properties
             )
@@ -251,8 +246,9 @@ class Premailer(object):
                 class_count = selector.count('.')
                 element_count = len(_element_selector_regex.findall(selector))
 
-                # Split rules within this selector that are !important from those that aren't. Only create
-                # rule if there are property declarations under it
+                # Within one rule individual properties have different priority depending on !important.
+                # So we split each rule into two: one that includes all the !important declarations and 
+                # another that doesn't.
                 if bulk_important:
                     is_important = 1
                     specificity = (is_important, id_count, class_count, element_count, ruleset_index, rule_index)

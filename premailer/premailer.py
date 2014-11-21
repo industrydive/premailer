@@ -403,7 +403,7 @@ class Premailer(object):
 
         kwargs.setdefault('method', self.method)
         kwargs.setdefault('pretty_print', pretty_print)
-        kwargs.setdefault('encoding', 'utf-8')  # As Ken Thompson intended
+        kwargs.setdefault('encoding', 'ascii')  # I prefer my unicode characters escaped by default
         out = etree.tostring(root, **kwargs).decode(kwargs['encoding'])
         if self.method == 'xml':
             out = _cdata_regex.sub(lambda m: '/*<![CDATA[*/%s/*]]>*/' % m.group(1), out)

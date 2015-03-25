@@ -111,7 +111,8 @@ class Premailer(object):
                  base_path=None,
                  disable_basic_attributes=None,
                  disable_validation=False,
-                 cache_css_parsing=True):
+                 cache_css_parsing=True,
+                 minimize_output=False):
         self.html = html
         self.base_url = base_url
         self.preserve_internal_links = preserve_internal_links
@@ -137,6 +138,7 @@ class Premailer(object):
         self.disable_basic_attributes = disable_basic_attributes
         self.disable_validation = disable_validation
         self.cache_css_parsing = cache_css_parsing
+        self.minimize_output = minimize_output
 
     def _parse_css_string(self, css_body, validate=True):
         if self.cache_css_parsing:
@@ -384,8 +386,11 @@ class Premailer(object):
         # and a long list of elements
         for _, element in elements.items():
             final_style = merge_styles(element['item'].attrib.get('style', ''),
-                                       element['style'], element['classes'])
-            element['item'].attrib['style'] = final_style
+                                       element['style'], element['classes'],
+                                       minimize_output=self.minimize_output)
+            if final_style:
+                # final style could be empty string because of minimize_output
+                element['item'].attrib['style'] = final_style
             self._style_to_basic_html_attributes(
                 element['item'],
                 final_style,

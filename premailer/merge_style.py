@@ -60,7 +60,7 @@ def merge_styles(inline_style, new_styles, classes, minimize_output=False):
             # Remove rules that we were going to set to 'inherit' because they
             # effectively are the same as not saying anything about the property
             # when inlined
-            kv = {k:v for k,v in kv.iteritems() if not v.lower() in ("inherit","unset")}
+            kv = dict((k,v) for (k,v) in kv.items() if not v.lower() in ("inherit","unset"))
         if not kv:
             continue
         if pseudoclass:

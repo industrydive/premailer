@@ -2,24 +2,25 @@ from __future__ import absolute_import, unicode_literals
 import sys
 import re
 import unittest
+import logging
 from contextlib import contextmanager
 if sys.version_info >= (3, ):  # As in, Python 3
     from urllib.request import urlopen
 else:  # Python 2
-    #lint:disable
     from urllib2 import urlopen
-    #lint:enable
+    urlopen = urlopen  # shut up pyflakes
 from io import BytesIO, StringIO  # Yes, the is an io lib in py2.x
 import gzip
 
 from nose.tools import eq_, ok_, assert_raises
 import mock
-from lxml.etree import XMLSyntaxError
+from lxml.etree import fromstring, XMLSyntaxError
 
 from premailer.premailer import (
     transform,
     Premailer,
     merge_styles,
+    csstext_to_pairs,
     ExternalNotFoundError,
 )
 from premailer.__main__ import main
@@ -99,15 +100,15 @@ class Tests(unittest.TestCase):
         pass
 
     def test_merge_styles_basic(self):
-        old = 'font-size:1px; color: red'
+        inline_style = 'font-size:1px; color: red'
         new = 'font-size:2px; font-weight: bold'
-        expect = 'color:red;', 'font-size:2px;', 'font-weight:bold'
-        result = merge_styles(old, new)
+        expect = 'color:red;', 'font-size:1px;', 'font-weight:bold'
+        result = merge_styles(inline_style, [csstext_to_pairs(new)], [''])
         for each in expect:
             ok_(each in result)
 
     def test_merge_styles_with_class(self):
-        old = 'color:red; font-size:1px;'
+        inline_style = 'color:red; font-size:1px;'
         new, class_ = 'font-size:2px; font-weight: bold', ':hover'
 
         # because we're dealing with dicts (random order) we have to
@@ -115,7 +116,7 @@ class Tests(unittest.TestCase):
         # We expect something like this:
         #  {color:red; font-size:1px} :hover{font-size:2px; font-weight:bold}
 
-        result = merge_styles(old, new, class_)
+        result = merge_styles(inline_style, [csstext_to_pairs(new)], [class_])
         ok_(result.startswith('{'))
         ok_(result.endswith('}'))
         ok_(' :hover{' in result)
@@ -129,14 +130,16 @@ class Tests(unittest.TestCase):
             ok_(each in split_regex.findall(result)[1])
 
     def test_merge_styles_non_trivial(self):
-        old = 'background-image:url("data:image/png;base64,iVBORw0KGg")'
+        inline_style = (
+            'background-image:url("data:image/png;base64,iVBORw0KGg")'
+        )
         new = 'font-size:2px; font-weight: bold'
         expect = (
             'background-image:url("data:image/png;base64,iVBORw0KGg")',
             'font-size:2px;',
             'font-weight:bold'
         )
-        result = merge_styles(old, new)
+        result = merge_styles(inline_style, [csstext_to_pairs(new)], [''])
         for each in expect:
             ok_(each in result)
 
@@ -373,7 +376,8 @@ class Tests(unittest.TestCase):
         eq_(rules_dict['ul li'], 'list-style:2px')
         ok_('a:hover' not in rules_dict)
 
-        p = Premailer('html', exclude_pseudoclasses=True)  # won't need the html
+        # won't need the html
+        p = Premailer('html', exclude_pseudoclasses=True)
         func = p._parse_style_rules
         rules, leftover = func("""
         ul li {  list-style: 2px; }
@@ -475,7 +479,6 @@ class Tests(unittest.TestCase):
         </head>
         <body>
         <img src="/images/foo.jpg">
-        <img src="/images/bar.gif">
         <img src="http://www.googe.com/photos/foo.jpg">
         <a href="/home">Home</a>
         <a href="http://www.peterbe.com">External</a>
@@ -491,10 +494,9 @@ class Tests(unittest.TestCase):
         <title>Title</title>
         </head>
         <body>
-        <img src="http://kungfupeople.com/base/images/foo.jpg">
-        <img src="http://kungfupeople.com/base/images/bar.gif">
+        <img src="http://kungfupeople.com/images/foo.jpg">
         <img src="http://www.googe.com/photos/foo.jpg">
-        <a href="http://kungfupeople.com/base/home">Home</a>
+        <a href="http://kungfupeople.com/home">Home</a>
         <a href="http://www.peterbe.com">External</a>
         <a href="http://www.peterbe.com/base/">External 2</a>
         <a href="http://kungfupeople.com/base/subpage">Subpage</a>
@@ -502,7 +504,7 @@ class Tests(unittest.TestCase):
         </body>
         </html>'''
 
-        p = Premailer(html, base_url='http://kungfupeople.com/base',
+        p = Premailer(html, base_url='http://kungfupeople.com/base/',
                       preserve_internal_links=True)
         result_html = p.transform()
 
@@ -533,14 +535,15 @@ class Tests(unittest.TestCase):
         </body>
         </html>"""
 
-        expect_html = '''<html>
+        expect_html = """<html>
         <head>
         <title>Title</title>
         </head>
-        <body style="background:url(http://example.com/bg.png); color:#123; font-family:Omerta">
+        <body style="background:url(http://exam
+ple.com/bg.png); color:#123; font-family:Omerta">
         <h1>Hi!</h1>
         </body>
-        </html>'''
+        </html>""".replace('exam\nple', 'example')
 
         p = Premailer(html)
         result_html = p.transform()
@@ -607,7 +610,6 @@ class Tests(unittest.TestCase):
 
         p = Premailer(html, exclude_pseudoclasses=False)
         result_html = p.transform()
-
         # because we're dealing with random dicts here we can't predict what
         # order the style attribute will be written in so we'll look for
         # things manually.
@@ -625,7 +627,7 @@ class Tests(unittest.TestCase):
     def test_css_with_pseudoclasses_excluded(self):
         "Skip things like `a:hover{}` and keep them in the style block"
 
-        html = '''<html>
+        html = """<html>
         <head>
         <style type="text/css">
         a { color:red; }
@@ -639,20 +641,20 @@ class Tests(unittest.TestCase):
         <a href="#">Page</a>
         <p>Paragraph</p>
         </body>
-        </html>'''
+        </html>"""
 
-        expect_html = '''<html>
-        <head>
-        <style type="text/css">a:hover {text-decoration:none}
-        a:hover {border:1px solid green}
-        a:visited {border:1px solid green}p::first-letter {float:left;font-size:300%}
-        </style>
-        </head>
-        <body>
-        <a href="#" style="border:1px solid green; color:red">Page</a>
-        <p>Paragraph</p>
-        </body>
-        </html>'''
+        expect_html = """<html>
+<head>
+<style type="text/css">a:hover {text-decoration:none}
+a:hover {border:1px solid green}
+a:visited {border:1px solid green}p::first-letter {float:left;font-size:300%}
+</style>
+</head>
+<body>
+<a href="#" style="border:1px solid green; color:red">Page</a>
+<p>Paragraph</p>
+</body>
+</html>"""
 
         p = Premailer(html, exclude_pseudoclasses=True)
         result_html = p.transform()
@@ -697,12 +699,14 @@ class Tests(unittest.TestCase):
         <p style="text-align:center" align="center">Text</p>
         <table style="width:200px" width="200">
           <tr>
-            <td style="background-color:red; vertical-align:middle" bgcolor="red" valign="middle">Cell 1</td>
-            <td style="background-color:red; vertical-align:middle" bgcolor="red" valign="middle">Cell 2</td>
+            <td style="background-color:red; vert
+ical-align:middle" bgcolor="red" valign="middle">Cell 1</td>
+            <td style="background-color:red; vert
+ical-align:middle" bgcolor="red" valign="middle">Cell 2</td>
           </tr>
         </table>
         </body>
-        </html>"""
+        </html>""".replace('vert\nical', 'vertical')
 
         p = Premailer(html, exclude_pseudoclasses=True)
         result_html = p.transform()
@@ -777,7 +781,8 @@ class Tests(unittest.TestCase):
         ok_('<html>' in result_html)
         ok_('<style media="only screen and (max-device-width: 480px)" '
             'type="text/css">\n'
-            '* {line-height: normal !important; -webkit-text-size-adjust: 125%}\n'
+            '* {line-height: normal !important; '
+            '-webkit-text-size-adjust: 125%}\n'
             '</style>' in result_html)
 
     def test_mailto_url(self):
@@ -825,12 +830,12 @@ class Tests(unittest.TestCase):
         </html>
         """
         expect_html = """<html>
-        <head>
-        </head>
-        <body>
-        <p style="height:100%; width:100%" height="100%" width="100%">Paragraph</p>
-        </body>
-        </html>"""
+<head>
+</head>
+<body>
+<p style="height:100%; width:100%" height="100%" width="100%">Paragraph</p>
+</body>
+</html>"""
 
         p = Premailer(html, strip_important=True)
         result_html = p.transform()
@@ -1183,10 +1188,11 @@ class Tests(unittest.TestCase):
         p = Premailer(html)
         result_html = p.transform()
 
-        compare_html(expect_html, result_html)        
+        compare_html(expect_html, result_html)
 
     def test_multiple_style_elements(self):
-        """Asserts that rules from multiple style elements are inlined correctly."""
+        """Asserts that rules from multiple style elements
+        are inlined correctly."""
 
         html = """<html>
         <head>
@@ -1216,9 +1222,10 @@ class Tests(unittest.TestCase):
         </head>
         <body>
         <h1 style="color:green">Hi!</h1>
-        <p style="font-size:120%"><strong style="text-decoration:none">Yes!</strong></p>
+        <p style="font-size:120%"><strong style="text-deco
+ration:none">Yes!</strong></p>
         </body>
-        </html>"""
+        </html>""".replace('deco\nration', 'decoration')
 
         p = Premailer(html)
         result_html = p.transform()
@@ -1299,9 +1306,10 @@ class Tests(unittest.TestCase):
         </head>
         <body>
         <h1 style="color:green">Hi!</h1>
-        <p style="font-size:16px"><strong style="text-decoration:none">Yes!</strong></p>
+        <p style="font-size:16px"><strong style="text-deco
+ration:none">Yes!</strong></p>
         </body>
-        </html>"""
+        </html>""".replace('deco\nration', 'decoration')
 
         p = Premailer(html)
         result_html = p.transform()
@@ -1417,13 +1425,14 @@ class Tests(unittest.TestCase):
         expect_html = """<html>
         <head>
         <title>Title</title>
-        <style type="text/css">/*<![CDATA[*/span:hover > a {background:red}/*]]>*/</style>
+        <style type="text/css">/*<![CDATA[*/span:hover > a {back
+ground:red}/*]]>*/</style>
         </head>
         <body>
         <span><a>Test</a></span>
         </body>
         </html>
-        """
+        """.replace('back\nground', 'background')
 
         p = Premailer(html, method="xml")
         result_html = p.transform()
@@ -1458,7 +1467,8 @@ class Tests(unittest.TestCase):
         ok_('<html>' in result_html)
         ok_('<style media="only screen and (max-device-width: 480px)" '
             'type="text/css">\n'
-            '* {line-height: normal !important; -webkit-text-size-adjust: 125%}\n'
+            '* {line-height: normal !important; '
+            '-webkit-text-size-adjust: 125%}\n'
             '</style>' in result_html)
 
     def test_command_line_preserve_style_tags(self):
@@ -1488,7 +1498,8 @@ class Tests(unittest.TestCase):
           color: purple;
         }
         </style>
-        <link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+        <link rel="alternate" type="applic
+ation/rss+xml" title="RSS" href="/rss.xml">
         <style type="text/css">
         .yshortcuts a {border-bottom: none !important;}
         @media screen and (max-width: 600px) {
@@ -1496,7 +1507,8 @@ class Tests(unittest.TestCase):
                 width: 100% !important;
             }
         }
-        /* Even comments should be preserved when the keep_style_tags flag is set */
+        /* Even comments should be preserved when the
+           keep_style_tags flag is set */
         p {font-size:12px;}
         </style>
         <style type="text/css">h1 {
@@ -1515,10 +1527,11 @@ class Tests(unittest.TestCase):
         </head>
         <body>
         <h1 style="color:brown">h1</h1>
-        <p style="font-size:12px"><a href="" style="{color:pink} :hover{color:purple}">html</a></p>
+        <p style="font-size:12px"><a href="" style="{color:pink} :hover{col
+or:purple}">html</a></p>
         </body>
         </html>
-        """
+        """.replace('col\nor', 'color').replace('applic\nation', 'application')
 
         compare_html(expect_html, result_html)
 
@@ -1534,7 +1547,8 @@ class Tests(unittest.TestCase):
         expect_html = """
         <html>
         <head>
-        <link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+        <link rel="alternate" type="applic
+ation/rss+xml" title="RSS" href="/rss.xml">
         <style type="text/css">@media screen and (max-width: 600px) {
             table[class="container"] {
                 width: 100% !important
@@ -1548,10 +1562,11 @@ class Tests(unittest.TestCase):
         </head>
         <body>
         <h1 style="color:brown">h1</h1>
-        <p style="font-size:12px"><a href="" style="{color:pink} :hover{color:purple}">html</a></p>
+        <p style="font-size:12px"><a href="" style="{color:pink} :hover{co
+lor:purple}">html</a></p>
         </body>
         </html>
-        """
+        """.replace('co\nlor', 'color').replace('applic\nation', 'application')
 
         compare_html(expect_html, result_html)
 
@@ -1566,7 +1581,8 @@ class Tests(unittest.TestCase):
         REPEATS = 100
 
         class RepeatMergeStylesThread(threading.Thread):
-            """The thread is instantiated by test and run multiple times in parallel."""
+            """The thread is instantiated by test and run multiple
+            times in parallel."""
             exc = None
 
             def __init__(self, old, new, class_):
@@ -1575,22 +1591,28 @@ class Tests(unittest.TestCase):
                 self.old, self.new, self.class_ = old, new, class_
 
             def run(self):
-                """Calls merge_styles in a loop and sets exc attribute if merge_styles raises an exception."""
-                for i in range(0, REPEATS):
+                """Calls merge_styles in a loop and sets exc attribute
+                if merge_styles raises an exception."""
+                for _ in range(0, REPEATS):
                     try:
                         merge_styles(self.old, self.new, self.class_)
                     except Exception as e:
                         logging.exception("Exception in thread %s", self.name)
                         self.exc = e
 
-        old = 'background-color:#ffffff;'
+        inline_style = 'background-color:#ffffff;'
         new = 'background-color:#dddddd;'
         class_ = ''
 
-        # start multiple threads concurrently; each calls merge_styles many times
+        # start multiple threads concurrently; each
+        # calls merge_styles many times
         threads = [
-            RepeatMergeStylesThread(old, new, class_)
-            for i in range(0, THREADS)
+            RepeatMergeStylesThread(
+                inline_style,
+                [csstext_to_pairs(new)],
+                [class_]
+            )
+            for _ in range(0, THREADS)
         ]
         for t in threads:
             t.start()
@@ -1613,8 +1635,10 @@ class Tests(unittest.TestCase):
         h1 { color:red; }
         h3 { color:yellow; }
         </style>
-        <link href="premailer/tests/test-external-links.css" rel="stylesheet" type="text/css">
-        <link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+        <link href="premailer/tests/test-external-links.css" rel="style
+sheet" type="text/css">
+        <link rel="alternate" type="applic
+ation/rss+xml" title="RSS" href="/rss.xml">
         <style type="text/css">
         h1 { color:orange; }
         </style>
@@ -1625,13 +1649,16 @@ class Tests(unittest.TestCase):
         <h3>Test</h3>
         <a href="#">Link</a>
         </body>
-        </html>"""
+        </html>""".replace(
+            'applic\naction', 'application'
+        ).replace('style\nsheet', 'stylesheet')
 
         expect_html = """<html>
         <head>
         <title>Title</title>
         <style type="text/css">a:hover {color:purple !important}</style>
-        <link rel="alternate" type="application/rss+xml" title="RSS" href="/rss.xml">
+        <link rel="alternate" type="applic
+ation/rss+xml" title="RSS" href="/rss.xml">
         </head>
         <body>
         <h1 style="color:orange">Hello</h1>
@@ -1639,7 +1666,7 @@ class Tests(unittest.TestCase):
         <h3 style="color:yellow">Test</h3>
         <a href="#" style="color:pink">Link</a>
         </body>
-        </html>"""
+        </html>""".replace('applic\naction', 'application')
 
         p = Premailer(
             html,
@@ -1682,7 +1709,8 @@ class Tests(unittest.TestCase):
         )
 
     def test_external_styles_and_links(self):
-        """Test loading stylesheets via both the 'external_styles' argument and link tags"""
+        """Test loading stylesheets via both the 'external_styles'
+        argument and link tags"""
 
         html = """<html>
         <head>
@@ -1701,7 +1729,8 @@ class Tests(unittest.TestCase):
         expect_html = """<html>
         <head>
         <style type="text/css">a:hover {color:purple !important}</style>
-        <style type="text/css">h2::after {content:"" !important;display:block !important}
+        <style type="text/css">h2::after {cont
+ent:"" !important;display:block !important}
         @media all and (max-width: 320px) {
             h1 {
                 font-size: 12px !important
@@ -1713,7 +1742,7 @@ class Tests(unittest.TestCase):
         <h2 style="color:green">Hello</h2>
         <a href="" style="color:pink">Hello</a>
         </body>
-        </html>"""
+        </html>""".replace('cont\nent', 'content')
 
         p = Premailer(
             html,
@@ -1734,7 +1763,7 @@ class Tests(unittest.TestCase):
         r = p._load_external_url(faux_uri)
 
         mocked_url_open.assert_called_once_with(faux_uri)
-        self.assertEqual(faux_response.decode('utf-8'), r)
+        eq_(faux_response.decode('utf-8'), r)
 
     @mock.patch('premailer.premailer.urlopen')
     def test_load_external_url_gzip(self, mocked_url_open):
@@ -1746,7 +1775,7 @@ class Tests(unittest.TestCase):
         r = p._load_external_url(faux_uri)
 
         mocked_url_open.assert_called_once_with(faux_uri)
-        self.assertEqual(faux_response.decode('utf-8'), r)
+        eq_(faux_response.decode('utf-8'), r)
 
     def test_css_text(self):
         """Test handling css_text passed as a string"""
@@ -1803,7 +1832,8 @@ class Tests(unittest.TestCase):
         compare_html(expect_html, result_html)
 
     def test_css_text_with_only_body_present(self):
-        """Test handling css_text passed as a string when no <html> or <head> is present"""
+        """Test handling css_text passed as a string when no <html> or
+        <head> is present"""
 
         html = """<body>
         <h1>Hello</h1>
@@ -1851,6 +1881,50 @@ class Tests(unittest.TestCase):
 
         compare_html(expect_html, result_html)
 
+    def test_css_disable_leftover_css(self):
+        """Test handling css_text passed as a string when no <html> or
+        <head> is present"""
+
+        html = """<body>
+        <h1>Hello</h1>
+        <h2>Hello</h2>
+        <a href="">Hello</a>
+        </body>"""
+
+        expect_html = """<html>
+        <body>
+        <h1 style="color:brown">Hello</h1>
+        <h2 style="color:green">Hello</h2>
+        <a href="" style="color:pink">Hello</a>
+        </body>
+        </html>"""
+
+        css_text = """
+        h1 {
+            color: brown;
+        }
+        h2 {
+            color: green;
+        }
+        a {
+            color: pink;
+        }
+        @media all and (max-width: 320px) {
+            h1 {
+                color: black;
+            }
+        }
+        """
+
+        p = Premailer(
+            html,
+            strip_important=False,
+            css_text=css_text,
+            disable_leftover_css=True)
+        result_html = p.transform()
+
+        compare_html(expect_html, result_html)
+
     @staticmethod
     def mocked_urlopen(url):
         'The standard "response" from the "server".'
@@ -1869,9 +1943,9 @@ class Tests(unittest.TestCase):
 
         html = """<html>
         <head>
-        <link href="https://www.com/style1.css" rel="stylesheet" type="text/css">
-        <link href="//www.com/style2.css" rel="stylesheet" type="text/css">
-        <link href="//www.com/style3.css" rel="stylesheet" type="text/css">
+        <link href="https://www.com/style1.css" rel="stylesheet">
+        <link href="//www.com/style2.css" rel="stylesheet">
+        <link href="//www.com/style3.css" rel="stylesheet">
         </head>
         <body>
         <h1>Hello</h1>
@@ -1908,9 +1982,9 @@ class Tests(unittest.TestCase):
 
         html = """<html>
         <head>
-        <link href="https://www.com/style1.css" rel="stylesheet" type="text/css">
-        <link href="//www.com/style2.css" rel="stylesheet" type="text/css">
-        <link href="/style3.css" rel="stylesheet" type="text/css">
+        <link href="https://www.com/style1.css" rel="stylesheet">
+        <link href="//www.com/style2.css" rel="stylesheet">
+        <link href="/style3.css" rel="stylesheet">
         </head>
         <body>
         <h1>Hello</h1>
@@ -1926,7 +2000,7 @@ class Tests(unittest.TestCase):
         expected_args = [(('https://www.com/style1.css',),),
                          (('https://www.com/style2.css',),),
                          (('https://www.peterbe.com/style3.css',),)]
-        self.assertEqual(expected_args, mocked_pleu.call_args_list)
+        eq_(expected_args, mocked_pleu.call_args_list)
         expect_html = """<html>
         <head>
         </head>
@@ -1955,7 +2029,7 @@ class Tests(unittest.TestCase):
         p = Premailer(html, base_url='http://www.peterbe.com/')
         result_html = p.transform()
         expected_args = [(('http://www.peterbe.com/style.css',),), ]
-        self.assertEqual(expected_args, mocked_pleu.call_args_list)
+        eq_(expected_args, mocked_pleu.call_args_list)
 
         expect_html = """<html>
         <head>
@@ -2037,7 +2111,7 @@ class Tests(unittest.TestCase):
                 src:
                     local('Garamond'),
                     local('Garamond-Regular'),
-                    url('Garamond.ttf') format('truetype'); /* Safari, Android, iOS */
+                    url('Garamond.ttf') format('truetype');
                     font-weight: normal;
                     font-style: normal;
             }
@@ -2094,3 +2168,254 @@ class Tests(unittest.TestCase):
 
         p = Premailer(html, disable_validation=True)
         p.transform()  # it should just work
+
+    def test_capture_cssutils_logging(self):
+        """you can capture all the warnings, errors etc. from cssutils
+        with your own logging. """
+        html = """<!doctype html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Document</title>
+            <style>
+            @keyframes fadein {
+                from { opacity: 0; }
+                to   { opacity: 1; }
+            }
+            </style>
+        </head>
+        <body></body>
+        </html>"""
+
+        mylog = StringIO()
+        myhandler = logging.StreamHandler(mylog)
+        p = Premailer(
+            html,
+            cssutils_logging_handler=myhandler,
+        )
+        p.transform()  # it should work
+        eq_(
+            mylog.getvalue(),
+            'CSSStylesheet: Unknown @rule found. [2:13: @keyframes]\n'
+        )
+
+        # only log errors now
+        mylog = StringIO()
+        myhandler = logging.StreamHandler(mylog)
+        p = Premailer(
+            html,
+            cssutils_logging_handler=myhandler,
+            cssutils_logging_level=logging.ERROR,
+        )
+        p.transform()  # it should work
+        eq_(mylog.getvalue(), '')
+
+    def test_type_test(self):
+        """test the correct type is returned"""
+
+        html = """<html>
+        <head>
+        <title>Title</title>
+        <style type="text/css">
+        h1, h2 { color:red; }
+        strong {
+            text-decoration:none
+            }
+        </style>
+        </head>
+        <body>
+        <h1>Hi!</h1>
+        <p><strong>Yes!</strong></p>
+        </body>
+        </html>"""
+
+        p = Premailer(html)
+        result = p.transform()
+        eq_(type(result), type(""))
+
+        html = fromstring(html)
+        etree_type = type(html)
+
+        p = Premailer(html)
+        result = p.transform()
+        ok_(type(result) != etree_type)
+
+    def test_ignore_some_inline_stylesheets(self):
+        """test that it's possible to put a `data-premailer="ignore"`
+        attribute on a <style> tag and it gets left alone (except that
+        the attribute gets removed)"""
+
+        html = """<html>
+        <head>
+        <title>Title</title>
+        <style type="text/css">
+        h1 { color:red; }
+        </style>
+        <style type="text/css" data-premailer="ignore">
+        h1 { color:blue; }
+        </style>
+        </head>
+        <body>
+        <h1>Hello</h1>
+        <h2>World</h2>
+        </body>
+        </html>"""
+
+        expect_html = """<html>
+        <head>
+        <title>Title</title>
+        <style type="text/css">
+        h1 { color:blue; }
+        </style>
+        </head>
+        <body>
+        <h1 style="color:red">Hello</h1>
+        <h2>World</h2>
+        </body>
+        </html>"""
+
+        p = Premailer(html, disable_validation=True)
+        result_html = p.transform()
+        compare_html(expect_html, result_html)
+
+    @mock.patch('premailer.premailer.warnings')
+    def test_ignore_some_incorrectly(self, warnings_mock):
+        """You can put `data-premailer="ignore"` but if the attribute value
+        is something we don't recognize you get a warning"""
+
+        html = """<html>
+        <head>
+        <title>Title</title>
+        <style type="text/css" data-premailer="blah">
+        h1 { color:blue; }
+        </style>
+        </head>
+        <body>
+        <h1>Hello</h1>
+        <h2>World</h2>
+        </body>
+        </html>"""
+
+        expect_html = """<html>
+        <head>
+        <title>Title</title>
+        </head>
+        <body>
+        <h1 style="color:blue">Hello</h1>
+        <h2>World</h2>
+        </body>
+        </html>"""
+
+        p = Premailer(html, disable_validation=True)
+        result_html = p.transform()
+        warnings_mock.warn.assert_called_with(
+            "Unrecognized data-premailer attribute ('blah')"
+        )
+
+        compare_html(expect_html, result_html)
+
+    def test_ignore_some_external_stylesheets(self):
+        """test that it's possible to put a `data-premailer="ignore"`
+        attribute on a <link> tag and it gets left alone (except that
+        the attribute gets removed)"""
+
+        # Know thy fixtures!
+        # The test-external-links.css has a `h1{color:blue}`
+        # And the test-external-styles.css has a `h1{color:brown}`
+        html = """<html>
+        <head>
+        <title>Title</title>
+        <link href="premailer/tests/test-external-links.css"
+         rel="stylesheet" type="text/css">
+        <link data-premailer="ignore"
+          href="premailer/tests/test-external-styles.css"
+          rel="stylesheet" type="text/css">
+        </head>
+        <body>
+        <h1>Hello</h1>
+        </body>
+        </html>"""
+
+        # Note that the `test-external-links.css` gets converted to a inline
+        # style sheet.
+        expect_html = """<html>
+<head>
+<title>Title</title>
+<style type="text/css">a:hover {color:purple}</style>
+<link href="premailer/tests/test-external-styles.css" rel="style
+sheet" type="text/css">
+</head>
+<body>
+<h1 style="color:blue">Hello</h1>
+</body>
+</html>""".replace('style\nsheet', 'stylesheet')
+
+        p = Premailer(html, disable_validation=True)
+        result_html = p.transform()
+        compare_html(expect_html, result_html)
+
+    def test_turnoff_cache_works_as_expected(self):
+        html = """<html>
+        <head>
+        <style>
+        .color {
+            color: green;
+        }
+        div.example {
+            font-size: 10px;
+        }
+        </style>
+        </head>
+        <body>
+        <div class="color example"></div>
+        </body>
+        </html>"""
+
+        expect_html = """<html>
+        <head>
+        </head>
+        <body>
+        <div style="color:green; font-size:10px"></div>
+        </body>
+        </html>"""
+
+        p = Premailer(html, cache_css_parsing=False)
+        self.assertFalse(p.cache_css_parsing)
+        # run one time first
+        p.transform()
+        result_html = p.transform()
+
+        compare_html(expect_html, result_html)
+
+    def test_links_without_protocol(self):
+        """If you the base URL is set to https://example.com and your html
+        contains <img src="//otherdomain.com/">... then the URL to point to
+        is "https://otherdomain.com/" not "https://example.com/file.css"
+        """
+        html = """<html>
+        <head>
+        </head>
+        <body>
+        <img src="//example.com">
+        </body>
+        </html>"""
+
+        expect_html = """<html>
+        <head>
+        </head>
+        <body>
+        <img src="{protocol}://example.com">
+        </body>
+        </html>"""
+
+        p = Premailer(html, base_url='https://www.peterbe.com')
+        result_html = p.transform()
+        compare_html(expect_html.format(protocol="https"), result_html)
+
+        p = Premailer(html, base_url='http://www.peterbe.com')
+        result_html = p.transform()
+        compare_html(expect_html.format(protocol="http"), result_html)
+
+        # Because you can't set a base_url without a full protocol
+        p = Premailer(html, base_url='www.peterbe.com')
+        assert_raises(ValueError, p.transform)

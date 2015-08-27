@@ -1,25 +1,4 @@
 from __future__ import absolute_import, unicode_literals, print_function
-try:
-    from collections import OrderedDict
-except ImportError:  # pragma: no cover
-    # some old python 2.6 thing then, eh?
-    from ordereddict import OrderedDict
-import sys
-import threading
-if sys.version_info >= (3, ):  # pragma: no cover
-    # As in, Python 3
-    from io import StringIO
-    from urllib.request import urlopen
-    from urllib.parse import urljoin
-    STR_TYPE = str
-else:  # Python 2
-    try:
-        from cStringIO import StringIO
-    except ImportError:  # pragma: no cover
-        from StringIO import StringIO  # lint:ok
-    from urllib2 import urlopen
-    from urlparse import urljoin
-    STR_TYPE = basestring
 from io import BytesIO  # Yes, there is an io module in Python 2
 import cgi
 import codecs
@@ -27,10 +6,34 @@ import gzip
 import operator
 import os
 import re
+import warnings
+try:
+    from collections import OrderedDict
+except ImportError:  # pragma: no cover
+    # some old python 2.6 thing then, eh?
+    from ordereddict import OrderedDict
+import sys
+if sys.version_info >= (3,):  # pragma: no cover
+    # As in, Python 3
+    from io import StringIO
+    from urllib.request import urlopen
+    from urllib.parse import urljoin, urlparse
+    STR_TYPE = str
+else:  # Python 2
+    try:
+        from cStringIO import StringIO
+    except ImportError:  # pragma: no cover
+        from StringIO import StringIO
+        StringIO = StringIO  # shut up pyflakes
+    from urllib2 import urlopen
+    from urlparse import urljoin, urlparse
+    STR_TYPE = basestring
+
 import cssutils
 from lxml import etree
 from lxml.cssselect import CSSSelector
-
+from premailer.merge_style import merge_styles, csstext_to_pairs
+from premailer.cache import function_cache
 
 __all__ = ['PremailerError', 'Premailer', 'transform']
 
@@ -41,79 +44,6 @@ class PremailerError(Exception):
 
 class ExternalNotFoundError(ValueError):
     pass
-
-
-grouping_regex = re.compile('([:\-\w]*){([^}]+)}')
-
-
-def merge_styles(old, new, class_=''):
-    """
-    if ::
-      old = 'font-size:1px; color: red'
-    and ::
-      new = 'font-size:2px; font-weight: bold'
-    then ::
-      return 'color: red; font-size:2px; font-weight: bold'
-
-    In other words, the new style bits replace the old ones.
-
-    The @class_ parameter can be something like ':hover' and if that
-    is there, you split up the style with '{...} :hover{...}'
-    Note: old could be something like '{...} ::first-letter{...}'
-
-    """
-
-    def csstext_to_pairs(csstext):
-        parsed = cssutils.css.CSSVariablesDeclaration(csstext)
-        for key in sorted(parsed):
-            yield (key, parsed.getVariableValue(key))
-
-    new_keys = set()
-    news = []
-
-    # The code below is wrapped in a critical section implemented via ``RLock``-class lock.
-    # The lock is required to avoid ``cssutils`` concurrency issues documented in issue #65
-    with merge_styles._lock:
-        for k, v in csstext_to_pairs(new):
-            news.append((k.strip(), v.strip()))
-            new_keys.add(k.strip())
-
-        groups = {}
-        grouped_split = grouping_regex.findall(old)
-        if grouped_split:
-            for old_class, old_content in grouped_split:
-                olds = []
-                for k, v in csstext_to_pairs(old_content):
-                    olds.append((k.strip(), v.strip()))
-                groups[old_class] = olds
-        else:
-            olds = []
-            for k, v in csstext_to_pairs(old):
-                olds.append((k.strip(), v.strip()))
-            groups[''] = olds
-
-    # Perform the merge
-    relevant_olds = groups.get(class_, {})
-    merged = [style for style in relevant_olds if style[0] not in new_keys] + news
-    groups[class_] = merged
-
-    if len(groups) == 1:
-        return '; '.join('%s:%s' % (k, v) for
-                          (k, v) in sorted(list(groups.values())[0]))
-    else:
-        all = []
-        sorted_groups = sorted(list(groups.items()),
-                               key=lambda a: a[0].count(':'))
-        for class_, mergeable in sorted_groups:
-            all.append('%s{%s}' % (class_,
-                                   '; '.join('%s:%s' % (k, v)
-                                              for (k, v)
-                                              in mergeable)))
-        return ' '.join(x for x in all if x != '{}')
-
-# The lock is used in merge_styles function to work around threading concurrency bug of cssutils library.
-# The bug is documented in issue #65. The bug's reproduction test in test_premailer.test_multithreading.
-merge_styles._lock = threading.RLock()
 
 
 def make_important(bulk):
@@ -136,6 +66,25 @@ def get_or_create_head(root):
         return head[0]
 
 
+@function_cache()
+def _cache_parse_css_string(css_body, validate=True):
+    """
+        This function will cache the result from cssutils
+        It is a big gain when number of rules is big
+        Maximum cache entries are 1000. This is mainly for
+        protecting memory leak in case something gone wild.
+        Be aware that you can turn the cache off in Premailer
+
+        Args:
+            css_body(str): css rules in string format
+            validate(bool): if cssutils should validate
+
+        Returns:
+            cssutils.css.cssstylesheet.CSSStyleSheet
+
+    """
+    return cssutils.parseString(css_body, validate=validate)
+
 _element_selector_regex = re.compile(r'(^|\s)\w')
 _cdata_regex = re.compile(r'\<\!\[CDATA\[(.*?)\]\]\>', re.DOTALL)
 _importants = re.compile('\s*!important')
@@ -145,6 +94,8 @@ FILTER_PSEUDOSELECTORS = [':last-child', ':first-child', 'nth-child']
 
 
 class Premailer(object):
+
+    attribute_name = 'data-premailer'
 
     def __init__(self, html, base_url=None,
                  preserve_internal_links=False,
@@ -159,7 +110,11 @@ class Premailer(object):
                  method="html",
                  base_path=None,
                  disable_basic_attributes=None,
-                 disable_validation=False):
+                 disable_validation=False,
+                 cache_css_parsing=True,
+                 cssutils_logging_handler=None,
+                 cssutils_logging_level=None,
+                 disable_leftover_css=False):
         self.html = html
         self.base_url = base_url
         self.preserve_internal_links = preserve_internal_links
@@ -184,20 +139,46 @@ class Premailer(object):
             disable_basic_attributes = []
         self.disable_basic_attributes = disable_basic_attributes
         self.disable_validation = disable_validation
+        self.cache_css_parsing = cache_css_parsing
+        self.disable_leftover_css = disable_leftover_css
+
+        if cssutils_logging_handler:
+            cssutils.log.addHandler(cssutils_logging_handler)
+        if cssutils_logging_level:
+            cssutils.log.setLevel(cssutils_logging_level)
+
+    def _parse_css_string(self, css_body, validate=True):
+        if self.cache_css_parsing:
+            return _cache_parse_css_string(css_body, validate=validate)
+
+        return cssutils.parseString(css_body, validate=validate)
 
     def _parse_style_rules(self, css_body, ruleset_index):
-        """ Returns a list of rules to apply to this doc and a list of rules that won't be used
-            because e.g. they are pseudoclasses. Rules look like: (specificity, selector, bulk) 
-            for example: ((0, 1, 0, 0, 0), u'.makeblue', u'color:blue'). The bulk of the rule
-            should not end in a semicolon.
+        """Returns a list of rules to apply to this doc and a list of rules
+        that won't be used because e.g. they are pseudoclasses. Rules
+        look like: (specificity, selector, bulk)
+        for example: ((0, 1, 0, 0, 0), u'.makeblue', u'color:blue').
+        The bulk of the rule should not end in a semicolon.
         """
+
+        def join_css_properties(properties):
+            """ Accepts a list of cssutils Property objects and returns
+            a semicolon delimitted string like 'color: red; font-size: 12px'
+            """
+            return ';'.join(
+                '{0}:{1}'.format(prop.name, prop.value)
+                for prop in properties
+            )
+
         leftover = []
         rules = []
-        rule_index = 0
         # empty string
         if not css_body:
             return rules, leftover
-        sheet = cssutils.parseString(css_body, validate=not self.disable_validation)
+        sheet = self._parse_css_string(
+            css_body,
+            validate=not self.disable_validation
+        )
         for rule in sheet:
             # handle media rule
             if rule.type == rule.MEDIA_RULE:
@@ -207,23 +188,22 @@ class Premailer(object):
             if rule.type != rule.STYLE_RULE:
                 continue
 
-            normal_properties = [prop for prop in rule.style.getProperties() if prop.priority != 'important']
-            important_properties = [prop for prop in rule.style.getProperties() if prop.priority == 'important']
+            # normal means it doesn't have "!important"
+            normal_properties = [
+                prop for prop in rule.style.getProperties()
+                if prop.priority != 'important'
+            ]
+            important_properties = [
+                prop for prop in rule.style.getProperties()
+                if prop.priority == 'important'
+            ]
 
-            bulk_normal = ';'.join(
-                # create semicolon delimitted string of non-!important properties
-                u'{0}:{1}'.format(prop.name, prop.value)
-                for prop in normal_properties
-            )
-            bulk_important = ';'.join(
-                # string of !important declarations
-                u'{0}:{1}'.format(prop.name, prop.value) # note value doesn't include "!important"
-                for prop in important_properties
-            )
-            bulk_all = ';'.join(
-                # string of ALL properties, important or not
-                u'{0}:{1}'.format(prop.name, prop.value)
-                for prop in normal_properties + important_properties
+            # Create three strings that we can use to add to the `rules`
+            # list later as ready blocks of css.
+            bulk_normal = join_css_properties(normal_properties)
+            bulk_important = join_css_properties(important_properties)
+            bulk_all = join_css_properties(
+                normal_properties + important_properties
             )
 
             selectors = (
@@ -240,60 +220,88 @@ class Premailer(object):
                     continue
                 elif '*' in selector and not self.include_star_selectors:
                     continue
-
                 # Crudely calculate specificity
                 id_count = selector.count('#')
                 class_count = selector.count('.')
                 element_count = len(_element_selector_regex.findall(selector))
 
-                # Within one rule individual properties have different priority depending on !important.
-                # So we split each rule into two: one that includes all the !important declarations and 
-                # another that doesn't.
-                if bulk_important:
-                    is_important = 1
-                    specificity = (is_important, id_count, class_count, element_count, ruleset_index, rule_index)
-                    rules.append((specificity, selector, bulk_important))
-                    rule_index += 1
-
-                if bulk_normal:
-                    is_important = 0
-                    specificity = (is_important, id_count, class_count, element_count, ruleset_index, rule_index)
-                    rules.append((specificity, selector, bulk_normal))
-                    rule_index += 1
+                # Within one rule individual properties have different
+                # priority depending on !important.
+                # So we split each rule into two: one that includes all
+                # the !important declarations and another that doesn't.
+                for is_important, bulk in (
+                    (1, bulk_important), (0, bulk_normal)
+                ):
+                    if not bulk:
+                        # don't bother adding empty css rules
+                        continue
+                    specificity = (
+                        is_important,
+                        id_count,
+                        class_count,
+                        element_count,
+                        ruleset_index,
+                        len(rules)  # this is the rule's index number
+                    )
+                    rules.append((specificity, selector, bulk))
         return rules, leftover
 
     def transform(self, pretty_print=True, **kwargs):
         """change the self.html and return it with CSS turned into style
         attributes.
         """
-        if self.method == 'xml':
-            parser = etree.XMLParser(ns_clean=False, resolve_entities=False)
+        if hasattr(self.html, "getroottree"):
+            # skip the next bit
+            root = self.html.getroottree()
+            page = root
+            tree = root
         else:
-            parser = etree.HTMLParser()
-        stripped = self.html.strip()
-        tree = etree.fromstring(stripped, parser).getroottree()
-        page = tree.getroot()
-        # lxml inserts a doctype if none exists, so only include it in
-        # the root if it was in the original html.
-        root = tree if stripped.startswith(tree.docinfo.doctype) else page
+            if self.method == 'xml':
+                parser = etree.XMLParser(
+                    ns_clean=False,
+                    resolve_entities=False
+                )
+            else:
+                parser = etree.HTMLParser()
+            stripped = self.html.strip()
+            tree = etree.fromstring(stripped, parser).getroottree()
+            page = tree.getroot()
+            # lxml inserts a doctype if none exists, so only include it in
+            # the root if it was in the original html.
+            root = tree if stripped.startswith(tree.docinfo.doctype) else page
 
         assert page is not None
 
-        head = get_or_create_head(tree)
-
-        ##
-        ## style selectors
-        ##
+        if self.disable_leftover_css:
+            head = None
+        else:
+            head = get_or_create_head(tree)
+        #
+        # style selectors
+        #
 
         rules = []
         index = 0
 
         for element in CSSSelector('style,link[rel~=stylesheet]')(page):
             # If we have a media attribute whose value is anything other than
-            # 'screen', ignore the ruleset.
+            # 'all' or 'screen', ignore the ruleset.
             media = element.attrib.get('media')
-            if media and media != 'screen':
+            if media and media not in ('all', 'screen'):
                 continue
+
+            data_attribute = element.attrib.get(self.attribute_name)
+            if data_attribute:
+                if data_attribute == 'ignore':
+                    del element.attrib[self.attribute_name]
+                    continue
+                else:
+                    warnings.warn(
+                        'Unrecognized %s attribute (%r)' % (
+                            self.attribute_name,
+                            data_attribute,
+                        )
+                    )
 
             is_style = element.tag == 'style'
             if is_style:
@@ -302,10 +310,11 @@ class Premailer(object):
                 href = element.attrib.get('href')
                 css_body = self._load_external(href)
 
-            these_rules, these_leftover = self._parse_style_rules(css_body, index)
+            these_rules, these_leftover = self._parse_style_rules(
+                css_body, index
+            )
             index += 1
             rules.extend(these_rules)
-
             parent_of_element = element.getparent()
             if these_leftover or self.keep_style_tags:
                 if is_style:
@@ -340,13 +349,17 @@ class Premailer(object):
                 self._process_css_text(css_body, index, rules, head)
                 index += 1
 
-        # rules is a tuple of (specificity, selector, styles), where specificity is a tuple
-        # ordered such that more specific rules sort larger.
+        # rules is a tuple of (specificity, selector, styles), where
+        # specificity is a tuple ordered such that more specific
+        # rules sort larger.
         rules.sort(key=operator.itemgetter(0))
 
-        first_time = []
-        first_time_styles = []
-        for __, selector, style in rules:
+        # collecting all elements that we need to apply rules on
+        # id is unique for the lifetime of the object
+        # and lxml should give us the same everytime during this run
+        # item id -> {item: item, classes: [], style: []}
+        elements = {}
+        for _, selector, style in rules:
             new_selector = selector
             class_ = ''
             if ':' in selector:
@@ -359,26 +372,36 @@ class Premailer(object):
                 selector = new_selector
 
             sel = CSSSelector(selector)
-            for item in sel(page):
-                old_style = item.attrib.get('style', '')
-                if not item in first_time:
-                    new_style = merge_styles(old_style, style, class_)
-                    first_time.append(item)
-                    first_time_styles.append((item, old_style))
-                else:
-                    new_style = merge_styles(old_style, style, class_)
-                item.attrib['style'] = new_style
-                self._style_to_basic_html_attributes(item, new_style,
-                                                     force=True)
+            items = sel(page)
+            if len(items):
+                # same so process it first
+                processed_style = csstext_to_pairs(style)
 
-        # Re-apply initial inline styles.
-        for item, inline_style in first_time_styles:
-            old_style = item.attrib.get('style', '')
-            if not inline_style:
-                continue
-            new_style = merge_styles(old_style, inline_style, class_)
-            item.attrib['style'] = new_style
-            self._style_to_basic_html_attributes(item, new_style, force=True)
+                for item in items:
+                    item_id = id(item)
+                    if item_id not in elements:
+                        elements[item_id] = {
+                            'item': item,
+                            'classes': [],
+                            'style': [],
+                        }
+
+                    elements[item_id]['style'].append(processed_style)
+                    elements[item_id]['classes'].append(class_)
+
+        # Now apply inline style
+        # merge style only once for each element
+        # crucial when you have a lot of pseudo/classes
+        # and a long list of elements
+        for _, element in elements.items():
+            final_style = merge_styles(element['item'].attrib.get('style', ''),
+                                       element['style'], element['classes'])
+            element['item'].attrib['style'] = final_style
+            self._style_to_basic_html_attributes(
+                element['item'],
+                final_style,
+                force=True
+            )
 
         if self.remove_classes:
             # now we can delete all 'class' attributes
@@ -386,30 +409,43 @@ class Premailer(object):
                 parent = item.getparent()
                 del parent.attrib['class']
 
-        ##
-        ## URLs
-        ##
+        #
+        # URLs
+        #
         if self.base_url:
+            if not urlparse(self.base_url).scheme:
+                raise ValueError('Base URL must have a scheme')
             for attr in ('href', 'src'):
                 for item in page.xpath("//@%s" % attr):
                     parent = item.getparent()
-                    if attr == 'href' and self.preserve_internal_links and parent.attrib[attr].startswith('#'):
+                    url = parent.attrib[attr]
+                    if (
+                        attr == 'href' and self.preserve_internal_links and
+                        url.startswith('#')
+                    ):
                         continue
-                    if attr == 'src' and self.preserve_inline_attachments and parent.attrib[attr].startswith('cid:'):
+                    if (
+                        attr == 'src' and self.preserve_inline_attachments and
+                        url.startswith('cid:')
+                    ):
                         continue
-                    if not self.base_url.endswith('/'):
-                        self.base_url += '/'
-                    parent.attrib[attr] = urljoin(self.base_url, parent.attrib[attr].lstrip('/'))
+                    parent.attrib[attr] = urljoin(self.base_url, url)
 
-        kwargs.setdefault('method', self.method)
-        kwargs.setdefault('pretty_print', pretty_print)
-        kwargs.setdefault('encoding', 'ascii')  # I prefer my unicode characters escaped by default
-        out = etree.tostring(root, **kwargs).decode(kwargs['encoding'])
-        if self.method == 'xml':
-            out = _cdata_regex.sub(lambda m: '/*<![CDATA[*/%s/*]]>*/' % m.group(1), out)
-        if self.strip_important:
-            out = _importants.sub('', out)
-        return out
+        if hasattr(self.html, "getroottree"):
+            return root
+        else:
+            kwargs.setdefault('method', self.method)
+            kwargs.setdefault('pretty_print', pretty_print)
+            kwargs.setdefault('encoding', 'utf-8')  # As Ken Thompson intended
+            out = etree.tostring(root, **kwargs).decode(kwargs['encoding'])
+            if self.method == 'xml':
+                out = _cdata_regex.sub(
+                    lambda m: '/*<![CDATA[*/%s/*]]>*/' % m.group(1),
+                    out
+                )
+            if self.strip_important:
+                out = _importants.sub('', out)
+            return out
 
     def _load_external_url(self, url):
         r = urlopen(url)
@@ -461,7 +497,10 @@ class Premailer(object):
         Note, the style_content can contain pseudoclasses like:
         '{color:red; border:1px solid green} :visited{border:1px solid green}'
         """
-        if style_content.count('}') and style_content.count('{') == style_content.count('{'):
+        if (
+            style_content.count('}') and
+            style_content.count('{') == style_content.count('}')
+        ):
             style_content = style_content.split('}')[0][1:]
 
         attributes = OrderedDict()
@@ -482,7 +521,10 @@ class Premailer(object):
                 attributes[key] = value
 
         for key, value in attributes.items():
-            if key in element.attrib and not force or key in self.disable_basic_attributes:
+            if (
+                key in element.attrib and not force or
+                key in self.disable_basic_attributes
+            ):
                 # already set, don't dare to overwrite
                 continue
             element.attrib[key] = value
@@ -509,12 +551,13 @@ class Premailer(object):
         return '\n'.join(lines)
 
     def _process_css_text(self, css_text, index, rules, head):
-        """processes the given css_text by adding rules that can be in-lined to the given rules list and
-        adding any that cannot be in-lined to the given `<head>` element
+        """processes the given css_text by adding rules that can be
+        in-lined to the given rules list and adding any that cannot
+        be in-lined to the given `<head>` element.
         """
         these_rules, these_leftover = self._parse_style_rules(css_text, index)
         rules.extend(these_rules)
-        if these_leftover or self.keep_style_tags:
+        if head is not None and (these_leftover or self.keep_style_tags):
             style = etree.Element('style')
             style.attrib['type'] = 'text/css'
             if self.keep_style_tags:

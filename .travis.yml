@@ -1,24 +1,50 @@
 # https://travis-ci.org/peterbe/premailer
 
+# This indicates to Travis that we will not use or need sudo
+# so that we can benefit from and use the cache->directories
+# directive.
+sudo: no
+
+env: PIP_DOWNLOAD_CACHE="pip_cache"
+cache:
+    directories:
+        - pip_cache
+
 language: python
 
-python:
-  - "2.6"
-  - "2.7"
-  - "3.3"
-  - "3.4"
-  - "pypy"
-
 before_install:
-  - pip install coverage
+  # twine is necessary so that travis can deploy
+  - travis_retry pip install twine
+  - travis_retry pip install coverage tox coveralls
 
 install:
-  - python setup.py install
+  - travis_retry python setup.py install
+
+env:
+  - TOX_ENV=flake8
+  - TOX_ENV=py26
+  - TOX_ENV=py27
+  - TOX_ENV=py32
+  - TOX_ENV=py33
+  - TOX_ENV=py34
+  - TOX_ENV=pypy
 
 script:
-  - nosetests premailer --with-cover --cover-erase --cover-package=premailer
+  - tox -e $TOX_ENV
 
 after_success:
   # Report coverage results to coveralls.io
-  - pip install coveralls --use-mirrors
   - coveralls
+
+deploy:
+  provider: pypi
+  user: peterbe
+  password:
+    secure: mdzD1SHDQ84ZK8tVXdF2LuMsws7it/7foompnuNUTQSVaKdjaHpwTYQtmdLUX0Jv54Plx4861GWNf6CD5IVfU7G8R2Ls/5/tQECFG01AspGz23lL1PxUg9tpNm+LPkQtkJzvS3f4i6/mODnKcoaSnhL63JuGaUNa72B1yBaN4hY=
+  on:
+    repo: peterbe/premailer
+  distributions: "sdist bdist_wheel"
+
+notifications:
+  email:
+    on_success: never

@@ -31,8 +31,8 @@ def merge_styles(inline_style, new_styles, classes, unset_removes_attribute=Fals
             inline_style(str): the old inline style of the element if there
             is one new_styles: a list of new styles, each element should be
             a list of tuple classes: a list of classes which maps
-            new_styles, important! unset_removes_attribute: don't write CSS values
-            that have no effect on styling.
+            new_styles, important! unset_removes_attribute: allow us to remove
+            certain CSS attributes with rules that set their value to 'unset'
 
         Returns:
             str: the final style

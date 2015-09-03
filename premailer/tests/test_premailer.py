@@ -2,6 +2,7 @@ from __future__ import absolute_import, unicode_literals
 import sys
 import re
 import unittest
+import logging
 from contextlib import contextmanager
 if sys.version_info >= (3, ):  # As in, Python 3
     from urllib.request import urlopen
@@ -488,7 +489,6 @@ class Tests(unittest.TestCase):
         </head>
         <body>
         <img src="/images/foo.jpg">
-        <img src="/images/bar.gif">
         <img src="http://www.googe.com/photos/foo.jpg">
         <a href="/home">Home</a>
         <a href="http://www.peterbe.com">External</a>
@@ -504,10 +504,9 @@ class Tests(unittest.TestCase):
         <title>Title</title>
         </head>
         <body>
-        <img src="http://kungfupeople.com/base/images/foo.jpg">
-        <img src="http://kungfupeople.com/base/images/bar.gif">
+        <img src="http://kungfupeople.com/images/foo.jpg">
         <img src="http://www.googe.com/photos/foo.jpg">
-        <a href="http://kungfupeople.com/base/home">Home</a>
+        <a href="http://kungfupeople.com/home">Home</a>
         <a href="http://www.peterbe.com">External</a>
         <a href="http://www.peterbe.com/base/">External 2</a>
         <a href="http://kungfupeople.com/base/subpage">Subpage</a>
@@ -515,7 +514,7 @@ class Tests(unittest.TestCase):
         </body>
         </html>'''
 
-        p = Premailer(html, base_url='http://kungfupeople.com/base',
+        p = Premailer(html, base_url='http://kungfupeople.com/base/',
                       preserve_internal_links=True)
         result_html = p.transform()
 
@@ -1892,6 +1891,50 @@ ent:"" !important;display:block !important}
 
         compare_html(expect_html, result_html)
 
+    def test_css_disable_leftover_css(self):
+        """Test handling css_text passed as a string when no <html> or
+        <head> is present"""
+
+        html = """<body>
+        <h1>Hello</h1>
+        <h2>Hello</h2>
+        <a href="">Hello</a>
+        </body>"""
+
+        expect_html = """<html>
+        <body>
+        <h1 style="color:brown">Hello</h1>
+        <h2 style="color:green">Hello</h2>
+        <a href="" style="color:pink">Hello</a>
+        </body>
+        </html>"""
+
+        css_text = """
+        h1 {
+            color: brown;
+        }
+        h2 {
+            color: green;
+        }
+        a {
+            color: pink;
+        }
+        @media all and (max-width: 320px) {
+            h1 {
+                color: black;
+            }
+        }
+        """
+
+        p = Premailer(
+            html,
+            strip_important=False,
+            css_text=css_text,
+            disable_leftover_css=True)
+        result_html = p.transform()
+
+        compare_html(expect_html, result_html)
+
     @staticmethod
     def mocked_urlopen(url):
         'The standard "response" from the "server".'
@@ -2136,6 +2179,47 @@ ent:"" !important;display:block !important}
         p = Premailer(html, disable_validation=True)
         p.transform()  # it should just work
 
+    def test_capture_cssutils_logging(self):
+        """you can capture all the warnings, errors etc. from cssutils
+        with your own logging. """
+        html = """<!doctype html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Document</title>
+            <style>
+            @keyframes fadein {
+                from { opacity: 0; }
+                to   { opacity: 1; }
+            }
+            </style>
+        </head>
+        <body></body>
+        </html>"""
+
+        mylog = StringIO()
+        myhandler = logging.StreamHandler(mylog)
+        p = Premailer(
+            html,
+            cssutils_logging_handler=myhandler,
+        )
+        p.transform()  # it should work
+        eq_(
+            mylog.getvalue(),
+            'CSSStylesheet: Unknown @rule found. [2:13: @keyframes]\n'
+        )
+
+        # only log errors now
+        mylog = StringIO()
+        myhandler = logging.StreamHandler(mylog)
+        p = Premailer(
+            html,
+            cssutils_logging_handler=myhandler,
+            cssutils_logging_level=logging.ERROR,
+        )
+        p.transform()  # it should work
+        eq_(mylog.getvalue(), '')
+
     def test_type_test(self):
         """test the correct type is returned"""
 
@@ -2312,6 +2396,39 @@ sheet" type="text/css">
         result_html = p.transform()
 
         compare_html(expect_html, result_html)
+
+    def test_links_without_protocol(self):
+        """If you the base URL is set to https://example.com and your html
+        contains <img src="//otherdomain.com/">... then the URL to point to
+        is "https://otherdomain.com/" not "https://example.com/file.css"
+        """
+        html = """<html>
+        <head>
+        </head>
+        <body>
+        <img src="//example.com">
+        </body>
+        </html>"""
+
+        expect_html = """<html>
+        <head>
+        </head>
+        <body>
+        <img src="{protocol}://example.com">
+        </body>
+        </html>"""
+
+        p = Premailer(html, base_url='https://www.peterbe.com')
+        result_html = p.transform()
+        compare_html(expect_html.format(protocol="https"), result_html)
+
+        p = Premailer(html, base_url='http://www.peterbe.com')
+        result_html = p.transform()
+        compare_html(expect_html.format(protocol="http"), result_html)
+
+        # Because you can't set a base_url without a full protocol
+        p = Premailer(html, base_url='www.peterbe.com')
+        assert_raises(ValueError, p.transform)
 
     def test_minimize_output(self):
         html = """<html>

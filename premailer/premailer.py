@@ -17,7 +17,7 @@ if sys.version_info >= (3,):  # pragma: no cover
     # As in, Python 3
     from io import StringIO
     from urllib.request import urlopen
-    from urllib.parse import urljoin
+    from urllib.parse import urljoin, urlparse
     STR_TYPE = str
 else:  # Python 2
     try:
@@ -26,7 +26,7 @@ else:  # Python 2
         from StringIO import StringIO
         StringIO = StringIO  # shut up pyflakes
     from urllib2 import urlopen
-    from urlparse import urljoin
+    from urlparse import urljoin, urlparse
     STR_TYPE = basestring
 
 import cssutils
@@ -112,6 +112,9 @@ class Premailer(object):
                  disable_basic_attributes=None,
                  disable_validation=False,
                  cache_css_parsing=True,
+                 cssutils_logging_handler=None,
+                 cssutils_logging_level=None,
+                 disable_leftover_css=False,
                  minimize_output=False):
         self.html = html
         self.base_url = base_url
@@ -138,7 +141,13 @@ class Premailer(object):
         self.disable_basic_attributes = disable_basic_attributes
         self.disable_validation = disable_validation
         self.cache_css_parsing = cache_css_parsing
+        self.disable_leftover_css = disable_leftover_css
         self.minimize_output = minimize_output
+
+        if cssutils_logging_handler:
+            cssutils.log.addHandler(cssutils_logging_handler)
+        if cssutils_logging_level:
+            cssutils.log.setLevel(cssutils_logging_level)
 
     def _parse_css_string(self, css_body, validate=True):
         if self.cache_css_parsing:
@@ -159,7 +168,7 @@ class Premailer(object):
             a semicolon delimitted string like 'color: red; font-size: 12px'
             """
             return ';'.join(
-                u'{0}:{1}'.format(prop.name, prop.value)
+                '{0}:{1}'.format(prop.name, prop.value)
                 for prop in properties
             )
 
@@ -237,7 +246,6 @@ class Premailer(object):
                         len(rules)  # this is the rule's index number
                     )
                     rules.append((specificity, selector, bulk))
-
         return rules, leftover
 
     def transform(self, pretty_print=True, **kwargs):
@@ -266,7 +274,10 @@ class Premailer(object):
 
         assert page is not None
 
-        head = get_or_create_head(tree)
+        if self.disable_leftover_css:
+            head = None
+        else:
+            head = get_or_create_head(tree)
         #
         # style selectors
         #
@@ -276,9 +287,9 @@ class Premailer(object):
 
         for element in CSSSelector('style,link[rel~=stylesheet]')(page):
             # If we have a media attribute whose value is anything other than
-            # 'screen', ignore the ruleset.
+            # 'all' or 'screen', ignore the ruleset.
             media = element.attrib.get('media')
-            if media and media != 'screen':
+            if media and media not in ('all', 'screen'):
                 continue
 
             data_attribute = element.attrib.get(self.attribute_name)
@@ -407,25 +418,23 @@ class Premailer(object):
         # URLs
         #
         if self.base_url:
-            if not self.base_url.endswith('/'):
-                self.base_url += '/'
+            if not urlparse(self.base_url).scheme:
+                raise ValueError('Base URL must have a scheme')
             for attr in ('href', 'src'):
                 for item in page.xpath("//@%s" % attr):
                     parent = item.getparent()
+                    url = parent.attrib[attr]
                     if (
                         attr == 'href' and self.preserve_internal_links and
-                        parent.attrib[attr].startswith('#')
+                        url.startswith('#')
                     ):
                         continue
                     if (
                         attr == 'src' and self.preserve_inline_attachments and
-                        parent.attrib[attr].startswith('cid:')
+                        url.startswith('cid:')
                     ):
                         continue
-                    parent.attrib[attr] = urljoin(
-                        self.base_url,
-                        parent.attrib[attr].lstrip('/')
-                    )
+                    parent.attrib[attr] = urljoin(self.base_url, url)
 
         if hasattr(self.html, "getroottree"):
             return root
@@ -553,7 +562,7 @@ class Premailer(object):
         """
         these_rules, these_leftover = self._parse_style_rules(css_text, index)
         rules.extend(these_rules)
-        if these_leftover or self.keep_style_tags:
+        if head is not None and (these_leftover or self.keep_style_tags):
             style = etree.Element('style')
             style.attrib['type'] = 'text/css'
             if self.keep_style_tags:

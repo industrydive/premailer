@@ -148,7 +148,7 @@ class Tests(unittest.TestCase):
         new = 'font-size: 10px; font-size: unset; font-weight: bold'
         expect = 'color:red;', 'font-weight:bold'
         css_new = csstext_to_pairs(new)
-        result = merge_styles(inline_style, [css_new], [''], minimize_output=True)
+        result = merge_styles(inline_style, [css_new], [''], unset_removes_attribute=True)
         for each in expect:
             ok_(each in result)
         ok_('font-size' not in result)

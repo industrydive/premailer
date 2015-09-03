@@ -398,7 +398,7 @@ class Premailer(object):
         for _, element in elements.items():
             final_style = merge_styles(element['item'].attrib.get('style', ''),
                                        element['style'], element['classes'],
-                                       minimize_output=self.minimize_output)
+                                       unset_removes_attribute=self.minimize_output)
             if final_style:
                 # final style could be empty string because of minimize_output
                 element['item'].attrib['style'] = final_style

@@ -19,7 +19,7 @@ def csstext_to_pairs(csstext):
 csstext_to_pairs._lock = threading.RLock()
 
 
-def merge_styles(inline_style, new_styles, classes, minimize_output=False):
+def merge_styles(inline_style, new_styles, classes, unset_removes_attribute=False):
     """
         This will merge all new styles where the order is important
         The last one will override the first
@@ -31,7 +31,7 @@ def merge_styles(inline_style, new_styles, classes, minimize_output=False):
             inline_style(str): the old inline style of the element if there
             is one new_styles: a list of new styles, each element should be
             a list of tuple classes: a list of classes which maps
-            new_styles, important! minimize_output: don't write CSS values
+            new_styles, important! unset_removes_attribute: don't write CSS values
             that have no effect on styling.
 
         Returns:
@@ -56,7 +56,7 @@ def merge_styles(inline_style, new_styles, classes, minimize_output=False):
     normal_styles = []
     pseudo_styles = []
     for pseudoclass, kv in styles.items():
-        if minimize_output:
+        if unset_removes_attribute:
             # Remove rules that we were going to have value 'unset' because they
             # effectively are the same as not saying anything about the property
             # when inlined

@@ -143,9 +143,9 @@ class Tests(unittest.TestCase):
         for each in expect:
             ok_(each in result)
 
-    def test_merge_styles_with_inherit(self):
+    def test_merge_styles_with_unset(self):
         inline_style = 'color: red'
-        new = 'font-size: 10px; font-size: inherit; font-weight: bold'
+        new = 'font-size: 10px; font-size: unset; font-weight: bold'
         expect = 'color:red;', 'font-weight:bold'
         css_new = csstext_to_pairs(new)
         result = merge_styles(inline_style, [css_new], [''], minimize_output=True)
@@ -2441,7 +2441,7 @@ sheet" type="text/css">
             color: blue;
         }
         span.nocolor {
-            color: inherit;
+            color: unset;
         }
         </style>
         </head>

@@ -143,6 +143,16 @@ class Tests(unittest.TestCase):
         for each in expect:
             ok_(each in result)
 
+    def test_merge_styles_with_unset(self):
+        inline_style = 'color: red'
+        new = 'font-size: 10px; font-size: unset; font-weight: bold'
+        expect = 'color:red;', 'font-weight:bold'
+        css_new = csstext_to_pairs(new)
+        result = merge_styles(inline_style, [css_new], [''], unset_removes_attribute=True)
+        for each in expect:
+            ok_(each in result)
+        ok_('font-size' not in result)
+
     def test_basic_html(self):
         """test the simplest case"""
 
@@ -2419,3 +2429,37 @@ sheet" type="text/css">
         # Because you can't set a base_url without a full protocol
         p = Premailer(html, base_url='www.peterbe.com')
         assert_raises(ValueError, p.transform)
+
+    def test_unset_removes_attribute(self):
+        html = """<html>
+        <head>
+        <style>
+        div {
+            color: green;
+        }
+        span {
+            color: blue;
+        }
+        span.nocolor {
+            color: unset;
+        }
+        </style>
+        </head>
+        <body>
+        <div class="color"><span class="nocolor"></span></div>
+        </body>
+        </html>"""
+
+        expect_html = """<html>
+        <head>
+        </head>
+        <body>
+        <div style="color:green"><span></span></div>
+        </body>
+        </html>"""
+
+        p = Premailer(html, unset_removes_attribute=True)
+        self.assertTrue(p.unset_removes_attribute)
+        result_html = p.transform()
+        print result_html
+        compare_html(expect_html, result_html)

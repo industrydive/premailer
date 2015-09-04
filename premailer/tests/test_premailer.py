@@ -2430,7 +2430,7 @@ sheet" type="text/css">
         p = Premailer(html, base_url='www.peterbe.com')
         assert_raises(ValueError, p.transform)
 
-    def test_minimize_output(self):
+    def test_unset_removes_attribute(self):
         html = """<html>
         <head>
         <style>
@@ -2458,8 +2458,8 @@ sheet" type="text/css">
         </body>
         </html>"""
 
-        p = Premailer(html, minimize_output=True)
-        self.assertTrue(p.minimize_output)
+        p = Premailer(html, unset_removes_attribute=True)
+        self.assertTrue(p.unset_removes_attribute)
         result_html = p.transform()
         print result_html
         compare_html(expect_html, result_html)
